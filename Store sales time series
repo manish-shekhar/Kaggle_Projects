@@ -143,3 +143,579 @@ sales_means = combine.groupby('family').mean().sales
 combine.loc[:,'family_groups'] = combine.loc[:,'family'].apply(lambda x : 'high_sellers' if sales_means[x]>=700 
                                                         else 'medium_sellers' if sales_means[x]>=100 else 'low_sellers')
 
+# creating a calendar. Calendar1 used as variable as calendar library imported
+
+calendar1 = pd.DataFrame(index=comb.groupby(['date','city','state']).count().index)
+
+for index in calendar1.index:
+    
+    if not (holidays_events.date.unique() == index[0]).any():
+        
+        calendar1.loc[index,'holiday_type'] = 'Work Day'
+    
+    elif (holidays_events.loc[holidays_events.transferred == True,'date'] == index[0]).any():
+        
+        calendar1.loc[index,'holiday_type'] = 'Work Day'
+    
+    elif (holidays_events.loc[(holidays_events.type.isin(['Holiday' ,'Transfer' ,'Additional', 'Bridge','Event'])) &(holidays_events.locale == 'National'),'date'] == index[0]).any():
+        
+        calendar1.loc[index,'holiday_type'] = 'National Holiday'       
+    
+    elif (holidays_events.loc[(holidays_events.type.isin(['Holiday' ,'Transfer' ,'Additional', 'Bridge', 'Event'])) & (holidays_events.locale == 'Regional') & (holidays_events.locale_name == index[2]),'date'] == index[0]).any():
+        
+        calendar1.loc[index,'holiday_type'] = 'Regional Holiday'
+    
+    elif (holidays_events.loc[(holidays_events.type.isin(['Holiday' ,'Transfer' ,'Additional', 'Bridge', 'Event'])) &(holidays_events.locale == 'Local') & (holidays_events.locale_name == index[1]),'date'] == index[0]).any():
+        
+        calendar1.loc[index,'holiday_type'] = 'Local Holiday'
+        
+    else:
+        calendar1.loc[index,'holiday_type'] = 'Work Day'
+
+comb2 = comb.merge(calendar1, on=['date','city','state'], how='left')
+
+comb3 = combine.copy()
+
+m_index = pd.MultiIndex.from_product([comb3["store_nbr"].unique(),
+                                      comb3["family"].unique(),
+                                      pd.date_range(start="2013-1-1", end="2017-8-31", freq="D")] # to get missing Christmas Days
+                                     ,names=["store_nbr","family", "date"])
+# comb3 = comb3.set_index(["store_nbr","family", "date"]).reindex(m_index).sort_index()
+
+comb4 = pd.DataFrame(index = m_index)
+
+comb5 = comb4.merge(comb3, on=['store_nbr','family','date'], how='left')
+
+comb6 = comb5.copy()
+
+indexes = comb6.loc[comb6.id.isna()].index
+
+na_dates = comb6.loc[indexes,'date'].unique()
+
+for index in indexes:
+    comb6.loc[index,'sales'] = 0
+    comb6.loc[index,'holiday_type'] = 'National Holiday'
+    comb6.loc[index,'onpromotion'] = 0
+    comb6.loc[index,'dop'] = oil.loc[oil.date == comb6.loc[index,'date'],'dop'].values
+    comb6.loc[index,'city'] = stores.loc[stores.store_nbr == comb6.loc[index,'store_nbr'],'city'].values[0]
+    comb6.loc[index,'state'] = stores.loc[stores.store_nbr == comb6.loc[index,'store_nbr'],'state'].values[0]
+    comb6.loc[index,'type'] = stores.loc[stores.store_nbr == comb6.loc[index,'store_nbr'],'type'].values[0]
+    comb6.loc[index,'cluster'] = stores.loc[stores.store_nbr == comb6.loc[index,'store_nbr'],'cluster'].values[0]
+    comb6.loc[index,'family_groups'] = 'high_sellers' if sales_means[comb6.loc[index,'family']]>=700 else 'medium_sellers' if sales_means[comb6.loc[index,'family']]>=100 else 'low_sellers'
+
+
+comb7 = comb6.copy()
+comb7 = comb7.drop(['id'],axis=1)
+
+# dataframe creation for efficiently calculating lags
+
+sales_df = comb7.loc[comb7.date >= datetime.datetime(2016,1,1)].loc[:,['store_nbr','family','date','sales']]
+
+sales_df = sales_df.set_index(["store_nbr", "family", "date"]).unstack()
+sales_df.columns = sales_df.columns.get_level_values(1)
+
+promo_df = comb7.loc[comb7.date >= datetime.datetime(2016,1,1)].loc[:,['store_nbr','family','date','onpromotion']]
+
+promo_df = promo_df.set_index(["store_nbr", "family", "date"]).unstack()
+promo_df.columns = promo_df.columns.get_level_values(1)
+
+
+dop_df = comb7.loc[comb7.date >= datetime.datetime(2016,1,1)].loc[:,['store_nbr','family','date','dop']]
+
+dop_df = dop_df.set_index(["store_nbr", "family", "date"]).unstack()
+dop_df.columns = dop_df.columns.get_level_values(1)
+
+
+# creating seasonal fourier features
+
+train_start = datetime.datetime(2016, 1, 1)
+train_end = datetime.datetime(2017, 7, 14)
+val_start = datetime.datetime(2017, 7, 15)
+val_end = datetime.datetime(2017, 7, 30)
+test_start = datetime.datetime(2017, 8, 16)
+test_end = datetime.datetime(2017, 8, 31)
+
+fourier = CalendarFourier(freq='M', order=20)
+
+dp = DeterministicProcess(
+index=pd.date_range(train_start, periods=(train_end - train_start).days),
+constant=True,
+order=1,
+seasonal=True,
+additional_terms=[fourier],
+drop=True,
+)
+
+X_in = dp.in_sample()
+X_in
+
+X_fore = X_train_fore = dp.out_of_sample((test_end - train_end).days+1)
+X_fore
+
+seasonal_features = pd.concat([X_in,X_fore],axis=0)
+
+seasonal_features = seasonal_features.reset_index()
+seasonal_features.loc[:,'date'] = seasonal_features.loc[:,'index']
+
+seasonal_features = seasonal_features.drop('index',axis=1)
+
+
+comb8 = comb7.merge(seasonal_features, on='date',how='left')
+ffr = comb8.date
+comb8.loc[:,'dayofweek'] = ffr.dt.dayofweek
+
+comb8.loc[:,'weekend'] = comb8.dayofweek.apply(lambda x : 1 if x>=5 else 0)
+comb8.loc[:,'payday'] = comb8.loc[:,'date'].apply(lambda x : 1 if ((x.day == calendar.monthrange(x.year, x.month)[1])
+                                                                  or (x.day == 15)) else 0)
+
+comb8.loc[:,'dayofmonth'] = comb8.loc[:,'date'].apply(lambda x : x.day)
+
+seasonal_features
+indexed_seasonal_features = pd.DataFrame(seasonal_features.values,index=seasonal_features.date,columns=seasonal_features.columns).drop('date',axis=1)
+indexed_seasonal_features
+
+X_season_train = indexed_seasonal_features.loc[(indexed_seasonal_features.index <= datetime.datetime(2017,8,15)) &
+                                              (indexed_seasonal_features.index >= datetime.datetime(2016,8,1))].values
+
+indexed_seasonal_features.loc[(indexed_seasonal_features.index <= datetime.datetime(2017,8,15)) &
+                                              (indexed_seasonal_features.index >= datetime.datetime(2016,8,1))]
+                                              
+X_season_test = indexed_seasonal_features.loc[indexed_seasonal_features.index >= datetime.datetime(2017,8,16)].values
+
+comb8_sales = comb8.loc[(comb8.date>=datetime.datetime(2016,1,1)) & 
+                        (comb8.date<=datetime.datetime(2017,8,15)),['date','store_nbr','family','sales']]
+comb8_sales.set_index(['date','store_nbr', 'family'], inplace=True)
+comb8_sales
+unstack_sales = comb8_sales.unstack().unstack()
+unstack_sales
+y_season_train = unstack_sales.loc[(unstack_sales.index <= datetime.datetime(2017,8,15)) &
+                                              (unstack_sales.index >= datetime.datetime(2016,8,1))].values
+y_season_train.shape
+unstack_sales.loc[(unstack_sales.index <= datetime.datetime(2017,8,15)) &
+                                              (unstack_sales.index >= datetime.datetime(2016,8,1))]
+
+# predicting seasonality
+
+model = LinearRegression(fit_intercept=False)
+
+model.fit(X_season_train,y_season_train)
+
+season_pred = model.predict(X_season_test)
+
+season_pred.shape
+
+season_fit = model.predict(X_season_train)
+
+season_pred_df = pd.DataFrame(season_pred,index = pd.date_range(datetime.datetime(2017,8,16),periods=16),
+                              columns = unstack_sales.columns)
+
+season_pred_df = season_pred_df.stack().stack()
+
+season_pred_df = season_pred_df.reset_index()
+season_pred_df.rename(columns = {'level_0':'date','sales':'season_sales'}, inplace = True)
+season_pred_df
+
+season_fit_df = pd.DataFrame(season_fit,index = pd.date_range(datetime.datetime(2016,8,1),datetime.datetime(2017,8,15)),
+                              columns = unstack_sales.columns)
+
+season_fit_df = season_fit_df.stack().stack()
+season_fit_df = season_fit_df.reset_index()
+season_fit_df.rename(columns = {'level_0':'date','sales':'season_sales'}, inplace = True)
+
+# season_fit_df.loc[season_fit_df.season_sales<0]
+
+season_fit_df.loc[:,'season_sales'] = season_fit_df.loc[:,'season_sales'].apply(lambda x: 0 if x<=0 else x)
+
+season_pred_df.loc[season_pred_df.season_sales<0]
+
+season_pred_df.loc[:,'season_sales'] = season_pred_df.loc[:,'season_sales'].apply(lambda x: 0 if x<=0 else x)
+
+
+comb8_resid = comb8.loc[comb8.date >= datetime.datetime(2016,8,1)]
+
+comb8_resid = comb8_resid.merge(season_fit_df,on=['store_nbr','family','date'],how='left')
+
+comb8_resid.loc[:,'resid_sales'] = comb8_resid.loc[:,'sales'] - comb8_resid.loc[:,'season_sales']
+
+
+resid_sales_df = comb8_resid.loc[comb8_resid.date >= datetime.datetime(2016,8,1)].loc[:,['store_nbr','family','date','resid_sales']]
+
+resid_sales_df = resid_sales_df.set_index(["store_nbr", "family", "date"]).unstack()
+resid_sales_df.columns = resid_sales_df.columns.get_level_values(1)
+
+consider_from = datetime.datetime(2017,1,1)
+
+comb9 = comb8.copy().loc[comb8.date >= consider_from]
+
+# this section creates lag features
+
+def get_timespan(df, dt, minus, periods, freq='D'):
+    return df[pd.date_range(dt - timedelta(days=minus), periods=periods, freq=freq)]
+
+X_1 = []
+y_1 = []
+for date in pd.date_range(consider_from, periods=(test_start - consider_from).days-1):
+    
+
+    X = {
+        "date": [date]*len(promo_df),
+        "store_nbr": promo_df.reset_index().store_nbr.values,
+        "family": promo_df.reset_index().family.values,
+        "promo_14_2017": get_timespan(promo_df, date, 14, 14).sum(axis=1).values,
+        "promo_60_2017": get_timespan(promo_df, date, 60, 60).sum(axis=1).values,
+        "promo_140_2017": get_timespan(promo_df, date, 140, 140).sum(axis=1).values,
+#         "promo_3_2017_aft": get_timespan(promo_df, date + timedelta(days=16), 15, 3).sum(axis=1).values,
+#         "promo_7_2017_aft": get_timespan(promo_df, date + timedelta(days=16), 15, 7).sum(axis=1).values,
+#         "promo_14_2017_aft": get_timespan(promo_df, date + timedelta(days=16), 15, 14).sum(axis=1).values,
+        "oil_14_2017" : get_timespan(dop_df, date, 14, 14).sum(axis=1).values,
+        'oil_60_2017' : get_timespan(dop_df, date, 60, 60).sum(axis=1).values,
+        "oil_140_2017": get_timespan(dop_df, date, 140, 140).sum(axis=1).values,
+        
+        }
+    
+    y = {
+        "date": [date]*len(promo_df),
+        "store_nbr": promo_df.reset_index().store_nbr.values,
+        "family": promo_df.reset_index().family.values
+    }
+    
+    for i in range(16):
+        y['step_%s' % str(i+1)] = resid_sales_df.loc[:,date + timedelta(days =(i + 1))].values
+    
+    for i in [3, 7, 14, 30, 60, 140]:
+        tmp = get_timespan(resid_sales_df, date, i, i)
+        X['diff_%s_mean' % i] = tmp.diff(axis=1).mean(axis=1).values
+        X['mean_%s_decay' % i] = (tmp * np.power(0.9, np.arange(i)[::-1])).sum(axis=1).values
+        X['mean_%s' % i] = tmp.mean(axis=1).values
+        X['median_%s' % i] = tmp.median(axis=1).values
+        X['min_%s' % i] = tmp.min(axis=1).values
+        X['max_%s' % i] = tmp.max(axis=1).values
+        X['std_%s' % i] = tmp.std(axis=1).values
+        
+    for i in [3, 7, 14, 30, 60, 140]:
+        tmp = get_timespan(resid_sales_df, date + timedelta(days=-7), i, i)
+        X['diff_%s_mean_2' % i] = tmp.diff(axis=1).mean(axis=1).values
+        X['mean_%s_decay_2' % i] = (tmp * np.power(0.9, np.arange(i)[::-1])).sum(axis=1).values
+        X['mean_%s_2' % i] = tmp.mean(axis=1).values
+        X['median_%s_2' % i] = tmp.median(axis=1).values
+        X['min_%s_2' % i] = tmp.min(axis=1).values
+        X['max_%s_2' % i] = tmp.max(axis=1).values
+        X['std_%s_2' % i] = tmp.std(axis=1).values
+    
+    for i in [7, 14, 30, 60, 140]:
+        tmp = get_timespan(resid_sales_df, date, i, i)
+        X['has_sales_days_in_last_%s' % i] = (tmp > 0).sum(axis=1).values
+        X['last_has_sales_day_in_last_%s' % i] = i - ((tmp > 0) * np.arange(i)).max(axis=1).values
+        X['first_has_sales_day_in_last_%s' % i] = ((tmp > 0) * np.arange(i, 0, -1)).max(axis=1).values
+
+        tmp = get_timespan(promo_df, date, i, i)
+        X['has_promo_days_in_last_%s' % i] = (tmp > 0).sum(axis=1).values
+        X['last_has_promo_day_in_last_%s' % i] = i - ((tmp > 0) * np.arange(i)).max(axis=1).values
+        X['first_has_promo_day_in_last_%s' % i] = ((tmp > 0) * np.arange(i, 0, -1)).max(axis=1).values
+
+#     tmp = get_timespan(promo_df, date + timedelta(days=16), 15, 15)
+#     X['has_promo_days_in_after_15_days'] = (tmp > 0).sum(axis=1).values
+#     X['last_has_promo_day_in_after_15_days'] = i - ((tmp > 0) * np.arange(15)).max(axis=1).values
+#     X['first_has_promo_day_in_after_15_days'] = ((tmp > 0) * np.arange(15, 0, -1)).max(axis=1).values
+    
+    for i in range(1, 30):
+        X['day_%s_2017' % i] = get_timespan(resid_sales_df, date, i, 1).values.ravel()
+
+    for i in range(7):
+        X['mean_4_dow{}_2017'.format(i)] = get_timespan(resid_sales_df, date, 28-i, 4-1, freq='7D').mean(axis=1).values
+        X['mean_20_dow{}_2017'.format(i)] = get_timespan(resid_sales_df, date, 140-i, 20-1, freq='7D').mean(axis=1).values
+        X['mean_10_dow{}_2017'.format(i)] = get_timespan(resid_sales_df, date, 70-i, 10-1, freq='7D').mean(axis=1).values
+        X['mean_7_dow{}_2017'.format(i)] = get_timespan(resid_sales_df, date, 49-i, 7-1, freq='7D').mean(axis=1).values
+
+    for i in range(-15, 15):
+        X["promo_{}".format(i)] = promo_df[pd.date_range(date - timedelta(days=i), periods=1, freq='D')].values.squeeze().astype(np.uint8)
+
+        
+    X = pd.DataFrame(X)
+    y = pd.DataFrame(y)
+    X_1.append(X)
+    y_1.append(y)
+
+X_t = pd.concat(X_1,axis=0)
+y_t = pd.concat(y_1,axis=0)
+X_t = X_t.merge(comb8_resid,on=['date','store_nbr','family'],how='left')
+X_t.rename(columns = {'sales':'same_day_sales','season_sales':'same_day_season_sales',
+                      'resid_sales':'same_day_resid_sales'}, inplace = True)
+
+y_t = y_t.dropna()
+
+types = rstr(X_t).loc[:,['data_type']]
+
+cat_cols = [x for x in X_t.columns if ((types.loc[x,'data_type'] == 'object'))]
+
+
+cat_cols.append('cluster')
+cat_cols.remove('family')
+
+
+num_cols = [x for x in X_t.columns if ((types.loc[x,'data_type'] == 'float64') or 
+                                       (types.loc[x,'data_type'] == 'int64') or 
+                                       (types.loc[x,'data_type'] == 'uint8'))]
+num_cols
+
+num_cols.remove('cluster')
+num_cols.remove('store_nbr')
+num_cols.remove('weekend')
+num_cols.remove('payday')
+
+# normalize and keep the values for reverse transformation
+
+standard = pd.DataFrame(index=['mu','sigma'],columns = X_t.columns)
+standard
+
+for col in num_cols:
+    m = X_t.loc[:,col].mean(axis=0)
+    s = X_t.loc[:,col].std(axis=0)
+    standard.loc['mu',col] = m
+    standard.loc['sigma',col] = s
+
+standard.loc['sigma','steps'] = y_t.iloc[:,3:].values.std()
+
+standard.loc['mu','steps'] = y_t.iloc[:,3:].values.mean()
+
+standard_notna = standard.dropna(axis=1)
+
+X_t_scaled = X_t.copy()
+y_t_scaled = y_t.copy()
+
+for col in standard_notna.columns:
+    if col != 'steps':
+        X_t_scaled.loc[:,col] = (X_t_scaled.loc[:,col] - standard_notna.loc['mu',col]) / standard_notna.loc['sigma',col]
+    
+y_t_scaled.iloc[:,3:] = (y_t_scaled.iloc[:,3:] - standard_notna.loc['mu','steps']) / standard_notna.loc['sigma','steps']
+
+
+X_t_scaled = X_t_scaled.drop(['family','store_nbr'],axis=1)
+
+X_t_scaled_encoded = X_t_scaled.copy()
+
+for col in cat_cols:
+    X_t_scaled_encoded = ohe(X_t_scaled_encoded,col)
+    
+X_t_scaled_encoded
+
+train_start = datetime.datetime(2017, 1, 1)
+train_end = datetime.datetime(2017, 7, 14)
+val_start = datetime.datetime(2017, 7, 15)
+val_end = datetime.datetime(2017, 7, 30)
+test_start = datetime.datetime(2017, 8, 16)
+test_end = datetime.datetime(2017, 8, 31)
+
+X_train = X_t_scaled_encoded.loc[(X_t_scaled_encoded.date >= train_start)
+                                 & (X_t_scaled_encoded.date <= train_end)].drop(['date'],axis=1)
+
+X_train
+
+y_train = y_t_scaled.loc[(y_t_scaled.date >= train_start) & 
+                         (y_t_scaled.date <= train_end)].drop(['date','store_nbr','family'],axis=1)
+                         
+X_val = X_t_scaled_encoded.loc[(X_t_scaled_encoded.date >= val_start) & (X_t_scaled_encoded.date <= val_end)].drop(['date'],axis=1)
+
+X_val
+
+y_val = y_t_scaled.loc[(y_t_scaled.date >= val_start) & (y_t_scaled.date <= val_end)].drop(['date','store_nbr','family'],axis=1)
+
+
+def prepare_dataset(date, is_val_train = True):
+    X = {
+        "date": [date]*len(promo_df),
+        "store_nbr": promo_df.reset_index().store_nbr.values,
+        "family": promo_df.reset_index().family.values,
+        "promo_14_2017": get_timespan(promo_df, date, 14, 14).sum(axis=1).values,
+        "promo_60_2017": get_timespan(promo_df, date, 60, 60).sum(axis=1).values,
+        "promo_140_2017": get_timespan(promo_df, date, 140, 140).sum(axis=1).values,
+#         "promo_3_2017_aft": get_timespan(promo_df, date + timedelta(days=16), 15, 3).sum(axis=1).values,
+#         "promo_7_2017_aft": get_timespan(promo_df, date + timedelta(days=16), 15, 7).sum(axis=1).values,
+#         "promo_14_2017_aft": get_timespan(promo_df, date + timedelta(days=16), 15, 14).sum(axis=1).values,
+        "oil_14_2017" : get_timespan(dop_df, date, 14, 14).sum(axis=1).values,
+        'oil_60_2017' : get_timespan(dop_df, date, 60, 60).sum(axis=1).values,
+        "oil_140_2017": get_timespan(dop_df, date, 140, 140).sum(axis=1).values,
+        
+        }
+    if is_val_train:
+        y = {
+            "date": [date]*len(promo_df),
+            "store_nbr": promo_df.reset_index().store_nbr.values,
+            "family": promo_df.reset_index().family.values
+        }
+
+        for i in range(16):
+            y['step_%s' % str(i+1)] = resid_sales_df.loc[:,date + timedelta(days =(i + 1))].values
+    
+    for i in [3, 7, 14, 30, 60, 140]:
+        tmp = get_timespan(resid_sales_df, date, i, i)
+        X['diff_%s_mean' % i] = tmp.diff(axis=1).mean(axis=1).values
+        X['mean_%s_decay' % i] = (tmp * np.power(0.9, np.arange(i)[::-1])).sum(axis=1).values
+        X['mean_%s' % i] = tmp.mean(axis=1).values
+        X['median_%s' % i] = tmp.median(axis=1).values
+        X['min_%s' % i] = tmp.min(axis=1).values
+        X['max_%s' % i] = tmp.max(axis=1).values
+        X['std_%s' % i] = tmp.std(axis=1).values
+        
+    for i in [3, 7, 14, 30, 60, 140]:
+        tmp = get_timespan(resid_sales_df, date + timedelta(days=-7), i, i)
+        X['diff_%s_mean_2' % i] = tmp.diff(axis=1).mean(axis=1).values
+        X['mean_%s_decay_2' % i] = (tmp * np.power(0.9, np.arange(i)[::-1])).sum(axis=1).values
+        X['mean_%s_2' % i] = tmp.mean(axis=1).values
+        X['median_%s_2' % i] = tmp.median(axis=1).values
+        X['min_%s_2' % i] = tmp.min(axis=1).values
+        X['max_%s_2' % i] = tmp.max(axis=1).values
+        X['std_%s_2' % i] = tmp.std(axis=1).values
+    
+    for i in [7, 14, 30, 60, 140]:
+        tmp = get_timespan(resid_sales_df, date, i, i)
+        X['has_sales_days_in_last_%s' % i] = (tmp > 0).sum(axis=1).values
+        X['last_has_sales_day_in_last_%s' % i] = i - ((tmp > 0) * np.arange(i)).max(axis=1).values
+        X['first_has_sales_day_in_last_%s' % i] = ((tmp > 0) * np.arange(i, 0, -1)).max(axis=1).values
+
+        tmp = get_timespan(promo_df, date, i, i)
+        X['has_promo_days_in_last_%s' % i] = (tmp > 0).sum(axis=1).values
+        X['last_has_promo_day_in_last_%s' % i] = i - ((tmp > 0) * np.arange(i)).max(axis=1).values
+        X['first_has_promo_day_in_last_%s' % i] = ((tmp > 0) * np.arange(i, 0, -1)).max(axis=1).values
+
+#     tmp = get_timespan(promo_df, date + timedelta(days=16), 15, 15)
+#     X['has_promo_days_in_after_15_days'] = (tmp > 0).sum(axis=1).values
+#     X['last_has_promo_day_in_after_15_days'] = i - ((tmp > 0) * np.arange(15)).max(axis=1).values
+#     X['first_has_promo_day_in_after_15_days'] = ((tmp > 0) * np.arange(15, 0, -1)).max(axis=1).values
+    
+    for i in range(1, 30):
+        X['day_%s_2017' % i] = get_timespan(resid_sales_df, date, i, 1).values.ravel()
+
+    for i in range(7):
+        X['mean_4_dow{}_2017'.format(i)] = get_timespan(resid_sales_df, date, 28-i, 4-1, freq='7D').mean(axis=1).values
+        X['mean_20_dow{}_2017'.format(i)] = get_timespan(resid_sales_df, date, 140-i, 20-1, freq='7D').mean(axis=1).values
+        X['mean_10_dow{}_2017'.format(i)] = get_timespan(resid_sales_df, date, 70-i, 10-1, freq='7D').mean(axis=1).values
+        X['mean_7_dow{}_2017'.format(i)] = get_timespan(resid_sales_df, date, 49-i, 7-1, freq='7D').mean(axis=1).values
+
+    for i in range(-15, 15):
+        X["promo_{}".format(i)] = promo_df[pd.date_range(date - timedelta(days=i), periods=1, freq='D')].values.squeeze().astype(np.uint8)
+        
+    X_t = pd.DataFrame(X)
+    if is_val_train:
+        y_t = pd.DataFrame(y)
+
+    X_t = X_t.merge(comb8_resid,on=['date','store_nbr','family'],how='left')
+    X_t.rename(columns = {'sales':'same_day_sales','season_sales':'same_day_season_sales',
+                          'resid_sales':'same_day_resid_sales'}, inplace = True)
+
+
+    types = rstr(X_t).loc[:,['data_type']]
+
+    cat_cols = [x for x in X_t.columns if ((types.loc[x,'data_type'] == 'object'))]
+
+
+    cat_cols.append('cluster')
+    cat_cols.remove('family')
+
+
+    num_cols = [x for x in X_t.columns if ((types.loc[x,'data_type'] == 'float64') or 
+                                           (types.loc[x,'data_type'] == 'int64') or 
+                                           (types.loc[x,'data_type'] == 'uint8'))]
+
+
+    num_cols.remove('cluster')
+    num_cols.remove('store_nbr')
+    num_cols.remove('weekend')
+    num_cols.remove('payday')
+
+    
+    X_t_scaled = X_t.copy()
+    if is_val_train:
+        y_t_scaled = y_t.copy()
+
+    for col in standard_notna.columns:
+        if col != 'steps':
+            X_t_scaled.loc[:,col] = (X_t_scaled.loc[:,col] - standard_notna.loc['mu',col]) / standard_notna.loc['sigma',col]
+
+    if is_val_train:
+        y_t_scaled.iloc[:,3:] = (y_t_scaled.iloc[:,3:] - standard_notna.loc['mu','steps']) / standard_notna.loc['sigma','steps']
+
+    X_t_scaled = X_t_scaled.drop(['family','store_nbr'],axis=1)
+
+    X_t_scaled_encoded = X_t_scaled.copy()
+
+    for col in cat_cols:
+        X_t_scaled_encoded = ohe(X_t_scaled_encoded,col)
+
+    X_val = X_t_scaled_encoded.loc[(X_t_scaled_encoded.date == date)].drop(['date'],axis=1)
+    if is_val_train:
+        y_val = y_t_scaled.loc[(y_t_scaled.date == date)].drop(['date','store_nbr','family'],axis=1)
+    
+    kk = X_train.columns.difference(X_val.columns).values
+#     print(X_val)
+    if len(kk)>0:
+        for col in kk:
+            X_val.loc[:,col] = 0
+    
+    if is_val_train:
+        return X_val,y_val
+    else:
+        return X_val
+
+
+print("Training models...")
+params = {
+    'num_leaves': 80,
+    'objective': 'regression',
+    'min_data_in_leaf': 200,
+    'learning_rate': 0.02,
+    'feature_fraction': 0.8,
+    'bagging_fraction': 0.7,
+    'bagging_freq': 1,
+    'metric': 'l2',
+    'num_threads': 16
+}
+
+MAX_ROUNDS = 5000
+cate_vars = []
+
+
+val_pred = []
+test_pred = []
+for date in pd.date_range(val_start, periods=1, freq = '16D'):
+    
+    X_val,y_val = prepare_dataset(date=date)
+    X_test = prepare_dataset(date = date + timedelta(days=32),is_val_train=False)
+    
+    
+    
+    for i in range(16):
+        print("=" * 50)
+        print("Step ", (date+timedelta(days=i)))
+        print("=" * 50)
+        dtrain = lgb.Dataset(
+            X_train.values, label=y_train.iloc[:,i].values,
+            categorical_feature=cate_vars,
+            )
+        dval = lgb.Dataset(
+            X_val.values, label=y_val.iloc[:,i].values, reference=dtrain,
+
+            categorical_feature=cate_vars)
+        bst = lgb.train(
+            params, dtrain, num_boost_round=MAX_ROUNDS,
+            valid_sets=[dtrain, dval], early_stopping_rounds=125, verbose_eval=50
+        )
+        print("\n".join(("%s: %.2f" % x) for x in sorted(
+            zip(X_train.columns, bst.feature_importance("gain")),
+            key=lambda x: x[1], reverse=True
+        )))
+
+        v = bst.predict(X_val.values, num_iteration=bst.best_iteration or MAX_ROUNDS)
+        val_pred.append(v)
+        print(len(val_pred))
+        k = bst.predict(X_test.values, num_iteration=bst.best_iteration or MAX_ROUNDS)
+        test_pred.append(k)
+
+        print("Validation mse for %s:"%date, mean_squared_error(y_val.iloc[:,i], v))
+        resid_sales_df.loc[:,(date + timedelta(days=(32+i)))] = k
+
+print('Final validation mse:',
+      mean_squared_error(
+          ((resid_sales_df.loc[:,pd.date_range(start=val_start,end=val_end)] - standard_notna.loc['mu','steps']) / standard_notna.loc['sigma','steps']),
+                                                 np.array(val_pred).transpose()))
+                                                 
