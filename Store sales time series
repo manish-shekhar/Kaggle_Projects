@@ -1,4 +1,4 @@
-# import important libraries
+# import required libraries
 
 import calendar
 import datetime
