@@ -1,0 +1,593 @@
+# import important libraries
+
+import pandas as pd
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split,GridSearchCV,StratifiedKFold
+import random
+
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier, GradientBoostingClassifier
+from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc, accuracy_score
+from sklearn.naive_bayes import GaussianNB
+from xgboost import XGBClassifier
+import xgboost as xgb
+from sklearn.feature_selection import SelectFromModel
+from catboost import CatBoostClassifier
+from sklearn import preprocessing
+from ipywidgets import interact
+from sklearn.preprocessing import MinMaxScaler, OneHotEncoder,LabelEncoder
+from sklearn.neighbors import KNeighborsClassifier
+from fancyimpute import KNN, IterativeImputer
+from sklearn.preprocessing import OrdinalEncoder
+from sklearn.impute import IterativeImputer, SimpleImputer
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+from lightgbm import LGBMClassifier
+
+# functions to summarise data and one hot encoding
+
+def rstr(df):
+    counts = df.apply(lambda x: x.count()).values
+    uniques = df.apply(lambda x: x.unique()).values
+    unique_count = [len(uniques[i]) for i in range(len(uniques))]
+    na_val = df.apply(lambda x: x.isna().sum()).values
+    na_perc = na_val/len(df)
+    data_type = df.dtypes
+    mean = df.apply(lambda x:x.mean() if x.dtypes in ['int64','float64'] else 'NaN')
+    std_dev = df.apply(lambda x:np.std(x) if x.dtypes in ['int64','float64'] else 'NaN')
+    quantile_25 = df.apply(lambda x: x.quantile(0.25) if x.dtypes in ['int64','float64'] else 'NaN')
+    quantile_75 = df.apply(lambda x: x.quantile(0.75) if x.dtypes in ['int64','float64'] else 'NaN')
+    min_val = df.apply(lambda x: x.min() if x.dtypes in ['int64','float64'] else 'NaN')
+    max_val = df.apply(lambda x: x.max() if x.dtypes in ['int64','float64'] else 'NaN')
+    d = pd.DataFrame({'counts': counts,'uniques':uniques,
+                      'na_val':na_val,'Na_perc':na_perc,'data_type':data_type,
+                      'mean':mean,'std_dev':std_dev,'Q25': quantile_25,'Q75':quantile_75,
+                      'min':min_val,'max':max_val,'uniques_counts':unique_count},
+                     index = df.columns)
+    return d
+
+def ohe(df,column):
+    df=df.copy()
+    dummies = pd.get_dummies(df[column],prefix=column)
+    df = pd.concat([df,dummies],axis=1)
+    df = df.drop(column, axis=1)
+    return df
+
+# read the data
+
+train_df = pd.read_csv('train.csv')
+test_df = pd.read_csv('test.csv')
+
+df1 = train_df.copy()
+df2 = test_df.copy()
+
+# combine into one dataframe
+
+combine = pd.concat([df1, df2], axis=0, join="outer")
+
+# feature engineering
+
+#Deck and side as separate columns
+
+combine["NumGroup"] = combine["PassengerId"].apply(lambda x: x.rsplit('_')[1])
+combine["Group"] = combine["PassengerId"].apply(lambda x: x.rsplit('_')[0])
+combine["Deck"] = combine["Cabin"].apply(lambda x: None if (str(x)=="" or str(x)=='nan') else str(x).rsplit('/')[0])
+combine["Side"] = combine["Cabin"].apply(lambda x: None if (str(x)=="" or str(x)=='nan') else str(x).rsplit('/')[2])
+
+combine.NumGroup = combine.NumGroup.astype(int)
+combine.Group = combine.Group.astype(int)
+
+# Convert ordinal to numeric Deck and side
+
+combine.Deck=combine.Deck.replace({'A':0,'B':1,'C':2,'D':3,'E':4,'F':5,'G':6,'T':7})
+
+combine.Side=combine.Side.replace({'P':0,'S':1})
+
+# encode ordinal variables
+
+encoder = OrdinalEncoder()
+
+for col in ['HomePlanet','CryoSleep','VIP','Destination','Transported','Deck','Side','NumGroup']:
+    
+    combine.loc[:,col] = encoder.fit_transform(combine.loc[:,col].values.reshape(-1,1))
+
+
+combine['is_alone'] = combine['NumGroup'].apply(lambda x: 1 if x==0 else 0).astype(int)
+    
+# drop name column
+
+combine.drop('Name',axis=1,inplace=True)
+
+
+# Missing values addition using RF
+
+comb = combine.loc[:,all_cols].copy()
+comb2 = comb.copy()
+
+comb.loc[:,cat_cols] = SimpleImputer(strategy = 'most_frequent').fit_transform(comb.loc[:,cat_cols])
+
+comb.loc[:,num_cols] = SimpleImputer(strategy = 'mean').fit_transform(comb.loc[:,num_cols])
+
+for col in cat_cols:
+    df2 = comb.copy()
+    df2.loc[:,col] = comb2.loc[:,col]
+    X_tr = df2[df2.loc[:,col].notna()].drop([col],axis=1).values
+    
+    X_te = df2[df2.loc[:,col].isna()].drop([col],axis=1).values
+    y_tr = df2[df2.loc[:,col].notna()].loc[:,col].values
+    modl = RandomForestClassifier()
+    modl.fit(X_tr,y_tr)
+    predicted = modl.predict(X_te)
+    df2.loc[df2.loc[:,col].isna(),col] = predicted
+    comb.loc[:,col] = df2.loc[:,col]
+    
+
+for col in num_cols:
+    df2 = comb.copy()
+    df2.loc[:,col] = comb2.loc[:,col]
+    X_tr = df2[df2.loc[:,col].notna()].drop([col],axis=1).values
+    
+    X_te = df2[df2.loc[:,col].isna()].drop([col],axis=1).values
+    y_tr = df2[df2.loc[:,col].notna()].loc[:,col].values
+    modl = RandomForestRegressor()
+    modl.fit(X_tr,y_tr)
+    predicted = modl.predict(X_te)
+    df2.loc[df2.loc[:,col].isna(),col] = predicted
+    comb.loc[:,col] = df2.loc[:,col]
+
+combine.loc[:,all_cols] = comb
+
+# make a total expense column
+
+combine['tot_exp'] = combine.loc[:,['RoomService', 'FoodCourt', 'ShoppingMall', 'Spa', 'VRDeck']].sum(axis=1,skipna=False)
+
+# make buckets
+
+def make_bins(num_bins,df,col,bin_col_name):
+    exp_quantile = df.loc[:,col].quantile(np.linspace(0,1,num_bins+1))
+    bins = exp_quantile.values
+
+    df[bin_col_name] = None
+    ff=0
+    gg=-1
+
+    for i in bins[1:]:
+        mask = ((df.loc[:,col] <=i) & (df.loc[:,col] > gg))
+        df.loc[mask,bin_col_name] = ff
+        ff+=1
+        gg=i
+
+yu=0
+col_names = ['age_bins','RoomService_bins', 'FoodCourt_bins', 'ShoppingMall_bins', 'Spa_bins', 'VRDeck_bins','exp_bins']
+for col in ['Age','RoomService', 'FoodCourt', 'ShoppingMall', 'Spa', 'VRDeck','tot_exp']:
+    make_bins(4,combine,col,col_names[yu])
+    yu+=1
+
+combine['exp_flag'] = combine['exp_bins'].apply(lambda x: 0 if x==0 else 1).astype(int)
+combine['RoomService_flag'] = combine['RoomService_bins'].apply(lambda x: 0 if x==0 else 1).astype(int)
+combine['FoodCourt_flag'] = combine['FoodCourt_bins'].apply(lambda x: 0 if x==0 else 1).astype(int)
+combine['ShoppingMall_flag'] = combine['ShoppingMall_bins'].apply(lambda x: 0 if x==0 else 1).astype(int)
+combine['Spa_flag'] = combine['Spa_bins'].apply(lambda x: 0 if x==0 else 1).astype(int)
+combine['VRDeck_flag'] = combine['VRDeck_bins'].apply(lambda x: 0 if x==0 else 1).astype(int)
+
+
+# convert bins as int
+cols = ['age_bins','RoomService_bins', 'FoodCourt_bins', 'ShoppingMall_bins', 'Spa_bins', 'VRDeck_bins','exp_bins']
+
+for col in cols:
+    combine.loc[:,col] = combine.loc[:,col].apply(lambda x: None if (x=="" or x==None or x=='nan') else int(x))
+
+
+# reset index of dataset
+
+combine.reset_index(inplace=True,drop=True)
+
+# scale variables
+
+scaler = MinMaxScaler(copy=False)
+
+cols = ['HomePlanet', 'CryoSleep',  'Destination', 'Age',
+       'VIP', 'RoomService', 'FoodCourt', 'ShoppingMall', 'Spa', 'VRDeck',
+       'Transported', 'NumGroup', 'Group', 'Deck', 'Side', 'is_alone',
+       'tot_exp', 'age_bins', 'RoomService_bins', 'FoodCourt_bins',
+       'ShoppingMall_bins', 'Spa_bins', 'VRDeck_bins', 'exp_bins', 'exp_flag',
+       'RoomService_flag', 'FoodCourt_flag', 'ShoppingMall_flag', 'Spa_flag',
+       'VRDeck_flag']
+
+for col in cols:
+    k = combine.loc[:,col].values.reshape(-1,1)
+    scaler.fit(k)
+    combine.loc[:,col]=np.around(scaler.transform(k),3)
+
+
+# split modified combine to train and test file dfs as provided in competition
+
+train_df = combine.loc[combine.loc[:,'Transported'].notna()]
+test_df = combine.loc[combine.loc[:,'Transported'].isna()]
+
+# select feature variables. We will reduce variables here for respective models after feature selection of that model
+# to include relevant features
+
+X_train_df = train_df.loc[:,['CryoSleep', 'VIP', 'Age', 'Group','RoomService', 'FoodCourt', 'ShoppingMall', 'Spa', 'VRDeck','tot_exp','exp_bins','age_bins','exp_flag','RoomService_flag', 'FoodCourt_flag', 'ShoppingMall_flag', 'Spa_flag','VRDeck_flag','HomePlanet_0.0', 'HomePlanet_0.5', 'HomePlanet_1.0',
+       'Destination_0.0', 'Destination_0.5', 'Destination_1.0', 'NumGroup_0.0',
+       'NumGroup_0.143', 'NumGroup_0.286', 'NumGroup_0.429', 'NumGroup_0.571',
+       'NumGroup_0.714', 'NumGroup_0.857', 'NumGroup_1.0', 'Deck_0.0',
+       'Deck_0.143', 'Deck_0.286', 'Deck_0.429', 'Deck_0.571', 'Deck_0.714',
+       'Deck_0.857', 'Deck_1.0', 'Side_0.0', 'Side_1.0', 'is_alone_0.0',
+       'is_alone_1.0']]
+X_test_df = test_df.loc[:,['CryoSleep', 'VIP', 'Age', 'Group','RoomService', 'FoodCourt', 'ShoppingMall', 'Spa', 'VRDeck','tot_exp','exp_bins','age_bins','exp_flag','RoomService_flag', 'FoodCourt_flag', 'ShoppingMall_flag', 'Spa_flag','VRDeck_flag','HomePlanet_0.0', 'HomePlanet_0.5', 'HomePlanet_1.0',
+       'Destination_0.0', 'Destination_0.5', 'Destination_1.0', 'NumGroup_0.0',
+       'NumGroup_0.143', 'NumGroup_0.286', 'NumGroup_0.429', 'NumGroup_0.571',
+       'NumGroup_0.714', 'NumGroup_0.857', 'NumGroup_1.0', 'Deck_0.0',
+       'Deck_0.143', 'Deck_0.286', 'Deck_0.429', 'Deck_0.571', 'Deck_0.714',
+       'Deck_0.857', 'Deck_1.0', 'Side_0.0', 'Side_1.0', 'is_alone_0.0',
+       'is_alone_1.0']]
+
+
+y_train_df = train_df.loc[:,['Transported']]
+
+# to validate on training data, splitting into train and test (technically validation set)
+
+X_train, X_test, y_train, y_test = train_test_split(X_train_df.values, y_train_df.values, 
+                                                    test_size=0.1, random_state=0)
+
+y_train = y_train[:,0]
+y_test = y_test[:,0]
+print(X_train.shape,X_test.shape,y_train.shape,y_test.shape)
+
+
+# start modelling. Checking performance on each model after feature selection and cross validation. Uncomment whichever
+# model to train and validate
+
+
+# model = LogisticRegression(solver='saga',max_iter = 500)
+
+# # feature selection
+
+# model.fit(X_train,y_train)
+# feature_scores = pd.Series(model.coef_[0], index=X_train_df.columns).sort_values(ascending=False)
+
+# feature_scores
+
+# gridsearch cv for cross validation
+
+# param_grid = {'C': [0.1, 1, 10, 100],  
+#               'class_weight': [None,'balanced'], 
+#               'penalty': ['l2','l1','elasticnet']}
+
+# grid = GridSearchCV(model, param_grid, refit = True, verbose = 3,n_jobs=-1,cv=10) 
+
+# # fitting the model for grid search 
+# grid.fit(X_train, y_train) 
+ 
+# # print best parameter after tuning 
+
+# print(grid.best_params_) 
+
+
+# model = RandomForestClassifier(criterion= 'entropy', max_features= 4, max_samples= 250, min_samples_split= 5, n_estimators= 20)
+
+# model = RandomForestClassifier()
+
+# # feature selection
+
+# model.fit(X_train,y_train)
+# feature_scores = pd.Series(model.feature_importances_, index=X_train_df.columns).sort_values(ascending=False)
+
+# feature_scores
+
+# # gridsearch cv for cross validation
+
+# param_grid = {'n_estimators': [5,10,15,20],  
+#               'criterion': ['gini', 'entropy'], 
+#               'min_samples_split': [2,5,10],
+#                'max_features': [1,2,3,4],
+#                 'max_samples': [50,100,150,200,250]}
+
+
+
+# grid = GridSearchCV(model, param_grid, refit = True, verbose = 0,n_jobs=-1,cv=10) 
+
+# # fitting the model for grid search 
+
+# grid.fit(X_train, y_train) 
+ 
+# # print best parameter after tuning 
+
+# print(grid.best_params_) 
+
+
+# model = AdaBoostClassifier()
+# model = AdaBoostClassifier(base_estimator=None, random_state=42,algorithm='SAMME.R',n_estimators = 50,learning_rate=0.6)
+
+# model.fit(X_train,y_train)
+# feature_scores = pd.Series(model.feature_importances_, index=X_train_df.columns).sort_values(ascending=False)
+
+# feature_scores
+
+# param_grid = {'learning_rate': [0.2,0.4,0.6,0.8,1],  
+#               'n_estimators': [5,10,20,30,40,50]}
+
+
+# grid = GridSearchCV(model, param_grid, refit = True, verbose = 0,n_jobs=-1,cv=10) 
+
+# # fitting the model for grid search 
+# grid.fit(X_train, y_train) 
+ 
+# # print best parameter after tuning 
+
+# print(grid.best_params_) 
+
+
+
+# model = GradientBoostingClassifier(random_state=42,learning_rate= 0.2, max_features= 3, n_estimators= 300, subsample= 0.8)
+
+# model = GradientBoostingClassifier()
+
+# model.fit(X_train,y_train)
+# feature_scores = pd.Series(model.feature_importances_, index=X_train_df.columns).sort_values(ascending=False)
+
+# feature_scores
+
+# param_grid = {'learning_rate': [0.2,0.4,0.6,0.8,1],  
+#               'n_estimators': [5,10,20,30,40,50],
+#              'subsample': [0.2,0.4,0.6,0.8,1],
+#              'max_features': [2,3,4,5,6]}
+
+
+
+# grid = GridSearchCV(model, param_grid, refit = True, verbose = 0,n_jobs=-1,cv=5) 
+
+# # fitting the model for grid search 
+# grid.fit(X_train, y_train) 
+ 
+# # print best parameter after tuning 
+
+# print(grid.best_params_) 
+
+
+
+# model = XGBClassifier(use_label_encoder=False,objective= 'binary:logistic', learning_rate= 0.4, 
+#                       max_depth= 8,alpha= 10, n_estimators= 500, subsample= 0.8, colsample_bytree= 0.5, 
+#                       colsample_bylevel= 0.7, colsample_bynode= 1)
+# model = XGBClassifier(silent=True)
+
+# model.fit(X_train,y_train)
+
+# feature_scores = pd.Series(model.feature_importances_, index=X_train_df.columns).sort_values(ascending=False)
+
+# feature_scores
+
+
+# data_dmatrix = xgb.DMatrix(data=X_train,label=y_train)
+# param_list = {"objective":['binary:logistic','reg:squarederror','reg:logistic','binary:logitraw','binary:hinge'],
+#               'learning_rate': [0.3,0.7,1,2,3],
+#                 'max_depth': [3,5,6,8,10], 'alpha': [10,13,16,20,25],
+#               'n_estimators': [50,100,150,200],'subsample' : [0.2,0.3,0.6,0.8,1],
+#              'colsample_bytree': [0.3,0.5,0.1,0.7,1], 'colsample_bylevel' :[0.3,0.5,0.1,0.7,1],
+#              'colsample_bynode': [0.3,0.5,0.1,0.7,1]}
+
+# cv_result = pd.DataFrame(index = pd.Series(range(20)).values,columns = ['params','score'])
+
+# cv_result.loc[:,'params'] = str()
+# cv_result.loc[:,'score'] = float()
+
+# for i in range(100):
+#     params = dict()
+
+#     for key in param_list.keys():        
+#         params[key] = random.choice(param_list[key])
+
+#     xgb_cv = xgb.cv(dtrain=data_dmatrix, params=params, nfold=5,
+#                         num_boost_round=50, early_stopping_rounds=10, metrics="auc", as_pandas=True, seed=123)
+#     cv_result.loc[i,['params']] = str(params)
+#     cv_result.loc[i,['score']] = xgb_cv.iloc[-1,0]
+
+# cv_result.loc[cv_result.loc[:,'score'].idxmax()]['params'],cv_result.loc[cv_result.loc[:,'score'].idxmax()]['score']
+    
+# model = CatBoostClassifier(depth=5,iterations=500,learning_rate=0.2,silent=True)
+
+# model = CatBoostClassifier(silent=True)
+
+# feature selection
+
+# model.fit(X_train,y_train)
+# feature_scores = pd.Series(model.feature_importances_, index=X_train_df.columns).sort_values(ascending=False)
+
+# feature_scores
+
+# gridsearch cv for cross validation
+
+# param_grid = {'depth'         : [4,5,6,7,8,9, 10],
+#               'learning_rate' : [0.1,0.3,0.5,0.7,1],
+#               'iterations'    : [10, 20,30,40,50,60,70]
+#              }
+
+
+
+# grid = GridSearchCV(model, param_grid, refit = True, verbose = 0,n_jobs=-1,cv=10) 
+
+# # fitting the model for grid search 
+# grid.fit(X_train, y_train) 
+ 
+# # print best parameter after tuning 
+
+# print(grid.best_params_) 
+
+
+# model = LGBMClassifier(boosting_type='gbdt',colsample_bytree=1,learning_rate=0.4,n_estimators=80,num_leaves=50,subsample=0.6)
+
+# model = LGBMClassifier()
+
+# # feature selection
+
+# model.fit(X_train,y_train)
+# feature_scores = pd.Series(model.feature_importances_, index=X_train_df.columns).sort_values(ascending=False)
+
+# feature_scores
+
+# gridsearch cv for cross validation
+
+# param_grid = {'boosting_type' : ['gbdt','goss','rf'],
+#               'num_leaves' : [40,50],
+#               'learning_rate'    : [0.4,0.6],
+#               'n_estimators' : [60,80,100],
+#               'subsample' : [0.6,0.8,1],
+#               'colsample_bytree' : [0.6,0.8,1]
+#              }
+
+# grid = GridSearchCV(model, param_grid, refit = True, verbose = 0,n_jobs=-1,cv=5) 
+
+# # fitting the model for grid search 
+# grid.fit(X_train, y_train) 
+ 
+# # print best parameter after tuning 
+
+# print(grid.best_params_) 
+
+# get confusion matrix and classification report to compare models
+
+model.fit(X_train,y_train)
+
+pred = model.predict(X_test)
+
+cm=confusion_matrix(y_test, pred)
+
+print("\n",model,"\n",
+          classification_report(y_test, pred),cm)
+
+probs = model.predict_proba(X_test)
+preds = probs[:,1]
+fpr, tpr, threshold = roc_curve(y_test, preds)
+print("Accuracy: ",accuracy_score(y_test, pred))
+
+
+
+# combining model results together balancing precision and recall
+
+
+# models = [CatBoostClassifier(depth=5,iterations=800,learning_rate=0.1,silent=True),
+#          LGBMClassifier(boosting_type='gbdt',colsample_bytree=1,learning_rate=0.2,n_estimators=100,num_leaves=40,subsample=0.6)]
+
+
+
+# models_features = [['HomePlanet', 'CryoSleep', 'Destination','VIP', 'Age', 'Deck', 'Side','Group','NumGroup','RoomService', 'FoodCourt', 'ShoppingMall', 'Spa', 'VRDeck','tot_exp','exp_bins','is_alone','age_bins','exp_flag','RoomService_flag', 'FoodCourt_flag', 'ShoppingMall_flag', 'Spa_flag','VRDeck_flag'],
+#                   ['HomePlanet', 'CryoSleep', 'Destination','VIP', 'Age', 'Deck', 'Side','Group','NumGroup','RoomService', 'FoodCourt', 'ShoppingMall', 'Spa', 'VRDeck','tot_exp','exp_bins','is_alone','age_bins','exp_flag','RoomService_flag', 'FoodCourt_flag', 'ShoppingMall_flag', 'Spa_flag','VRDeck_flag']]
+
+
+# wt_lst = [pd.Series([1,3]),pd.Series([1,2]),pd.Series([2,1]),pd.Series([3,1])]
+
+# for weights in wt_lst:
+
+#     o=0
+#     predictions = pd.DataFrame()
+    
+#     for model in models:
+#         X_train1, X_test1, y_train1, y_test1 = train_test_split(X_train_df.loc[:,models_features[o]].values, y_train_df.values, 
+#                                                         test_size=0.1, random_state=0)
+#         y_train1 = y_train1[:,0]
+#         y_test1 = y_test1[:,0]
+#         folds = StratifiedKFold(shuffle=True,n_splits=10)
+
+#         y_probs = list()
+
+#         for fold, (train_id, test_id) in enumerate(folds.split(X_train1, y_train1)):
+            
+#             # Split data
+#             X_train2 = X_train1[train_id]
+#             y_train2 = y_train1[train_id]
+#             X_valid2 = X_train1[test_id]
+#             y_valid2 = y_train1[test_id]
+
+#             model.fit(X_train2, y_train2)
+
+#             # test
+#             y_probs.append(model.predict_proba(X_test1)[:,1])
+# #             y_probs.append(model.predict(X_test1))
+            
+#         model_probs = pd.DataFrame(y_probs).T
+#         model_probs.loc[:,"Mean"] = model_probs.mean(axis=1)
+        
+#         predictions.loc[:,o] = model_probs.loc[:,'Mean'].values
+        
+#         o=o+1
+        
+
+#     predictions.loc[:,'Total'] = predictions.dot(weights)
+
+#     predictions.loc[:,'perc_true'] = predictions.loc[:,'Total']/sum(weights)
+#     predictions.loc[:,'Final_pred'] = predictions.loc[:,'perc_true'].apply(lambda x: 1 if x>=0.5 else 0)
+
+#     final_pred = predictions.loc[:,'Final_pred']
+
+
+#     cm=confusion_matrix(y_test1, final_pred)
+
+#     print("\n","Ensemble","\n",weights,
+#               classification_report(y_test1, final_pred),cm)
+#     print("Accuracy score:",accuracy_score(y_test1, final_pred))
+
+
+
+# # training ensemble on full train.csv
+
+# models = [CatBoostClassifier(depth=5,iterations=800,learning_rate=0.1,silent=True),
+#          LGBMClassifier(boosting_type='gbdt',colsample_bytree=1,learning_rate=0.2,n_estimators=100,num_leaves=40,subsample=0.6)]
+
+
+
+# models_features = [['HomePlanet', 'CryoSleep', 'Destination','VIP', 'Age', 'Deck', 'Side','NumGroup','Group','RoomService', 'FoodCourt', 'ShoppingMall', 'Spa', 'VRDeck','tot_exp','is_alone','exp_bins','age_bins'],
+#                   ['HomePlanet', 'CryoSleep', 'Destination','VIP', 'Age', 'Deck', 'Side','NumGroup','Group','RoomService', 'FoodCourt', 'ShoppingMall', 'Spa', 'VRDeck','tot_exp','is_alone','exp_bins','age_bins']]
+
+# weights = pd.Series([1,1])
+
+# o=0
+# predictions = pd.DataFrame()
+# for model in models:
+#     X_train1 = X_train_df.loc[:,models_features[o]].values
+#     y_train1 = y_train_df.values[:,0]
+#     X_test1 = X_test_df.loc[:,models_features[o]].values
+    
+#     folds = StratifiedKFold(shuffle=True,n_splits=10)
+
+#     y_probs = list()
+
+#     for fold, (train_id, test_id) in enumerate(folds.split(X_train1, y_train1)):
+
+#         # Split data
+#         X_train2 = X_train1[train_id]
+#         y_train2 = y_train1[train_id]
+#         X_valid2 = X_train1[test_id]
+#         y_valid2 = y_train1[test_id]
+
+#         model.fit(X_train2, y_train2)
+
+#         # test
+# #         y_probs.append(model.predict_proba(X_test1)[:,1])
+#         y_probs.append(model.predict(X_test1))
+
+#     model_probs = pd.DataFrame(y_probs).T
+#     model_probs.loc[:,"Mean"] = model_probs.mean(axis=1)
+        
+#     predictions.loc[:,o] = model_probs.loc[:,'Mean'].values
+#     o=o+1
+
+
+# predictions.loc[:,'Total'] = predictions.dot(weights)
+# predictions.loc[:,'perc_true'] = predictions.loc[:,'Total']/sum(weights)
+# predictions.loc[:,'Final_pred'] = predictions.loc[:,'perc_true'].apply(lambda x: 1 if x>=0.5 else 0)
+
+
+
+# final_pred = predictions.loc[:,'Final_pred']
+
+# submit_df = pd.DataFrame({'PassengerId': pd.Series(dtype='str'),
+#                    'Transported': pd.Series(dtype='int')})
+# submit_df.loc[:,'PassengerId'] = test_df.loc[:,'PassengerId']
+# submit_df.loc[:,'Transported'] = predictions.loc[:,'Final_pred']
+# submit_df.loc[:,'Transported'] = submit_df.loc[:,'Transported'].astype('boolean')
+
+# submit_df
+# submit_df.to_csv('titanic_spaceship_submit.csv',index=False)
+
