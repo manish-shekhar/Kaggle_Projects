@@ -125,7 +125,7 @@ for col in cat_cols:
 
 for col in num_cols:
     df2 = comb.copy()
-    df2.loc[:,col] = comb2.loc[:,col]
+    df2.loc[:,col] = comb.loc[:,col]
     X_tr = df2[df2.loc[:,col].notna()].drop([col],axis=1).values
     
     X_te = df2[df2.loc[:,col].isna()].drop([col],axis=1).values
@@ -137,7 +137,7 @@ for col in num_cols:
     comb.loc[:,col] = df2.loc[:,col]
 
 combine.loc[:,all_cols] = comb
-
+del comb
 # make a total expense column
 
 combine['tot_exp'] = combine.loc[:,['RoomService', 'FoodCourt', 'ShoppingMall', 'Spa', 'VRDeck']].sum(axis=1,skipna=False)
