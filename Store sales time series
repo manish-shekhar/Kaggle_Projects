@@ -205,6 +205,7 @@ for index in indexes:
 
 
 comb7 = comb6.copy()
+
 comb7 = comb7.drop(['id'],axis=1)
 
 # dataframe creation for efficiently calculating lags
@@ -269,6 +270,8 @@ comb8.loc[:,'payday'] = comb8.loc[:,'date'].apply(lambda x : 1 if ((x.day == cal
                                                                   or (x.day == 15)) else 0)
 
 comb8.loc[:,'dayofmonth'] = comb8.loc[:,'date'].apply(lambda x : x.day)
+
+del comb2, comb3, comb4, comb5, comb6, comb7
 
 seasonal_features
 indexed_seasonal_features = pd.DataFrame(seasonal_features.values,index=seasonal_features.date,columns=seasonal_features.columns).drop('date',axis=1)
